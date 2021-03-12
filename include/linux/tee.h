@@ -376,7 +376,7 @@ struct tee_iocl_data_pipe_context {
 	__u32 cache_size;
 	__u32 mode;
 	__u32 type;
-	__u32 data_ptr;
+	__u64 data_ptr;
 	__u32 data_size;
 };
 #define TEE_IOC_OPEN_DATA_PIPE	_IOR(TEE_IOC_MAGIC, TEE_IOC_BASE + 8, \

@@ -32,6 +32,7 @@
 #include <tee_data_pipe.h>
 
 #define DATA_PIPE_DEBUG                   (0)
+#define PIPE_INFO_DEBUG                   (0)
 
 #define SIZE_1K                           (1024)
 #define SIZE_1M                           (SIZE_1K * SIZE_1K)
@@ -146,6 +147,7 @@ static void dump_pipe_info(const data_pipe_t *pipe)
 {
 	(void)pipe;
 
+#if PIPE_INFO_DEBUG
 	DEBUG("pipe->id = %d\n", pipe->id);
 	DEBUG("pipe->status = %d\n", pipe->status);
 	DEBUG("pipe->mode = %d\n", pipe->mode);
@@ -162,6 +164,7 @@ static void dump_pipe_info(const data_pipe_t *pipe)
 	DEBUG("pipe->cache_from_svr.data_start = 0x%016lx\n", (long)pipe->cache_from_svr.data_start);
 	DEBUG("pipe->cache_from_svr.data_end = 0x%016lx\n", (long)pipe->cache_from_svr.data_end);
 	DEBUG("pipe->cache_from_svr.cache = 0x%016lx\n", (long)pipe->cache_from_svr.cache);
+#endif
 }
 
 static data_pipe_t* get_opening_pipe(void)
@@ -287,7 +290,6 @@ static uint32_t write_cache(data_pipe_t *pipe, cyclic_cache_t *cache,
 	uint32_t empty_size = 0;
 	char *cache_end = NULL;
 	uint32_t tmp_id = pipe->id;
-	uint32_t mode = pipe->mode;
 	int wait_status = 0;
 
 	while (pipe->status == STATUS_OPENED && *to_write_size > 0 && pipe->id == tmp_id && wait_status == 0) {
@@ -352,10 +354,7 @@ static uint32_t write_cache(data_pipe_t *pipe, cyclic_cache_t *cache,
 
 	*to_write_size = finished_size;
 
-	if (mode == MODE_BLOCKING)
-		return *to_write_size ? TEEC_SUCCESS : TEEC_ERROR_COMMUNICATION;
-	else
-		return TEEC_SUCCESS;
+	return TEEC_SUCCESS;
 }
 
 #define ONCE_COPY_TO_USER(to, from, size) \
@@ -373,7 +372,6 @@ static uint32_t read_cache(data_pipe_t *pipe, cyclic_cache_t *cache,
 	uint32_t readable_size = 0;
 	char *cache_end = NULL;
 	uint32_t tmp_id = pipe->id;
-	uint32_t mode = pipe->mode;
 	int wait_status = 0;
 
 	while (pipe->status == STATUS_OPENED && *buf_size > 0 && pipe->id == tmp_id && wait_status == 0) {
@@ -429,10 +427,7 @@ static uint32_t read_cache(data_pipe_t *pipe, cyclic_cache_t *cache,
 
 	*buf_size = finished_size;
 
-	if (mode == MODE_BLOCKING)
-		return *buf_size ? TEEC_SUCCESS : TEEC_ERROR_COMMUNICATION;
-	else
-		return TEEC_SUCCESS;
+	return TEEC_SUCCESS;
 }
 
 static uint32_t close_pipe_by_id(uint32_t pipe_id)
@@ -442,14 +437,17 @@ static uint32_t close_pipe_by_id(uint32_t pipe_id)
 	cyclic_cache_t *cache_from_svr = NULL;
 
 	pipe_ptr = get_pipe_by_id(pipe_id);
+
 	if (!pipe_ptr) {
 		INFO("data pipe had been closed\n");
 		return TEEC_SUCCESS;
 	}
 
+	mutex_lock(&pipe_ptr->pipe_lock);
+
 	if (pipe_ptr->status == STATUS_CLOSED) {
 		INFO("data pipe had been closed\n");
-		return TEEC_SUCCESS;
+		goto exit;
 	}
 
 	if (pipe_ptr->status == STATUS_OPENED) {
@@ -458,7 +456,6 @@ static uint32_t close_pipe_by_id(uint32_t pipe_id)
 		mutex_unlock(&g_pipe_cnt_lock);
 	}
 
-	mutex_lock(&pipe_ptr->pipe_lock);
 	pipe_ptr->status = STATUS_CLOSED;
 	pipe_ptr->mode = 0;
 
@@ -522,6 +519,8 @@ void init_data_pipe_set(void)
 	init_waitqueue_head(&g_wait_queue_for_accept);
 	init_waitqueue_head(&g_wait_queue_for_open);
 	init_waitqueue_head(&g_wait_queue_for_data);
+
+	DEBUG("leave function %s\n", __func__);
 }
 
 void destroy_data_pipe_set(void)
@@ -551,6 +550,8 @@ void destroy_data_pipe_set(void)
 			cache->cache = NULL;
 		}
 	}
+
+	DEBUG("leave function %s\n", __func__);
 }
 
 uint32_t tee_ioctl_open_data_pipe(struct tee_context *tee_ctx,
@@ -561,8 +562,14 @@ uint32_t tee_ioctl_open_data_pipe(struct tee_context *tee_ctx,
 
 	DEBUG("enter function %s\n", __func__);
 
+	if (g_backlog == 0) {
+		ERROR("data pipe server isn't running\n");
+		return TEE_ERROR_ACCESS_DENIED;
+	}
+
 	if (g_cur_pipe_cnt >= g_backlog) {
-		ERROR("there are too many opened data pipes\n");
+		ERROR("there are too many opened data pipes, max pipe count: %d, current pipe count: %d\n",
+				g_backlog, g_cur_pipe_cnt);
 		return TEE_ERROR_ACCESS_DENIED;
 	}
 
@@ -604,6 +611,8 @@ uint32_t tee_ioctl_open_data_pipe(struct tee_context *tee_ctx,
 		g_cur_pipe_cnt++;
 		mutex_unlock(&g_pipe_cnt_lock);
 
+		DEBUG("leave function %s\n", __func__);
+
 		return TEEC_SUCCESS;
 	} else
 		return TEEC_ERROR_OUT_OF_MEMORY;
@@ -612,6 +621,7 @@ uint32_t tee_ioctl_open_data_pipe(struct tee_context *tee_ctx,
 uint32_t tee_ioctl_close_data_pipe(struct tee_context *tee_ctx,
 		struct tee_iocl_data_pipe_context __user *user_pipe_ctx)
 {
+	uint32_t res = TEEC_SUCCESS;
 	struct tee_iocl_data_pipe_context pipe_ctx;
 
 	DEBUG("enter function %s\n", __func__);
@@ -621,7 +631,11 @@ uint32_t tee_ioctl_close_data_pipe(struct tee_context *tee_ctx,
 		return TEEC_ERROR_SECURITY;
 	}
 
-	return close_pipe_by_id(pipe_ctx.id);
+	res = close_pipe_by_id(pipe_ctx.id);
+
+	DEBUG("leave function %s\n", __func__);
+
+	return res;
 }
 
 uint32_t tee_ioctl_write_pipe_data(struct tee_context *tee_ctx,
@@ -663,9 +677,10 @@ uint32_t tee_ioctl_write_pipe_data(struct tee_context *tee_ctx,
 	}
 
 	to_write_size = pipe_ctx.data_size;
-	res = write_cache(pipe_ptr, cache, (void *)(long)pipe_ctx.data_ptr, &pipe_ctx.data_size);
-	if (res != TEEC_SUCCESS || ((pipe_ptr->mode == MODE_BLOCKING) && (to_write_size != pipe_ctx.data_size))) {
+	res = write_cache(pipe_ptr, cache, (void *)(unsigned long)pipe_ctx.data_ptr, &pipe_ctx.data_size);
+	if (res != TEEC_SUCCESS || ((pipe_ptr->mode == MODE_BLOCKING) && (to_write_size != pipe_ctx.data_size)))
 		close_pipe_by_id(pipe_ptr->id);
+	if (res != TEEC_SUCCESS) {
 		ERROR("write_cache failed\n");
 		return res;
 	}
@@ -674,6 +689,8 @@ uint32_t tee_ioctl_write_pipe_data(struct tee_context *tee_ctx,
 		ERROR("copy_to_user failed\n");
 		return TEEC_ERROR_SECURITY;
 	}
+
+	DEBUG("leave function %s\n", __func__);
 
 	return TEEC_SUCCESS;
 }
@@ -717,9 +734,10 @@ uint32_t tee_ioctl_read_pipe_data(struct tee_context *tee_ctx,
 	}
 
 	to_read_size = pipe_ctx.data_size;
-	res = read_cache(pipe_ptr, cache, (void *)(long)pipe_ctx.data_ptr, &pipe_ctx.data_size);
-	if (res != TEEC_SUCCESS || ((pipe_ptr->mode == MODE_BLOCKING) && (to_read_size != pipe_ctx.data_size))) {
+	res = read_cache(pipe_ptr, cache, (void *)(unsigned long)pipe_ctx.data_ptr, &pipe_ctx.data_size);
+	if (res != TEEC_SUCCESS || ((pipe_ptr->mode == MODE_BLOCKING) && (to_read_size != pipe_ctx.data_size)))
 		close_pipe_by_id(pipe_ptr->id);
+	if (res != TEEC_SUCCESS) {
 		ERROR("read_cache failed\n");
 		return res;
 	}
@@ -728,6 +746,8 @@ uint32_t tee_ioctl_read_pipe_data(struct tee_context *tee_ctx,
 		ERROR("copy_to_user failed\n");
 		return TEEC_ERROR_SECURITY;
 	}
+
+	DEBUG("leave function %s\n", __func__);
 
 	return TEEC_SUCCESS;
 }
@@ -742,8 +762,10 @@ uint32_t tee_ioctl_listen_data_pipe(struct tee_context *tee_ctx,
 		return TEEC_ERROR_SECURITY;
 	}
 
-	if (g_backlog > MAX_NUM_DATA_PIPE)
+	if (g_backlog > MAX_NUM_DATA_PIPE || g_backlog == 0)
 		g_backlog = MAX_NUM_DATA_PIPE;
+
+	DEBUG("leave function %s\n", __func__);
 
 	return TEEC_SUCCESS;
 }
@@ -769,9 +791,6 @@ uint32_t tee_ioctl_accept_data_pipe(struct tee_context *tee_ctx,
 
 	if (pipe) {
 		if (copy_to_user(user_pipe_id, &pipe->id, sizeof(uint32_t))) {
-			mutex_lock(&pipe->pipe_lock);
-			pipe->status = STATUS_CLOSED;
-			mutex_unlock(&pipe->pipe_lock);
 			ERROR("copy_to_user failed\n");
 			res = TEEC_ERROR_SECURITY;
 		} else {
@@ -786,6 +805,8 @@ uint32_t tee_ioctl_accept_data_pipe(struct tee_context *tee_ctx,
 
 exit:
 	wake_up_interruptible(&g_wait_queue_for_open);
+
+	DEBUG("leave function %s\n", __func__);
 
 	return res;
 }
