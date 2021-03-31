@@ -20,8 +20,6 @@
 #include "optee_smc.h"
 #include "optee_private.h"
 
-#define OPTEE_WM_DEBUG      0
-
 #define SRC_IRQ_NAME        "viu-vsync"
 #define DST_IRQ_NAME        "wm-vsync"
 
@@ -58,24 +56,34 @@ static int get_wm_irq_id(void)
 	struct device_node *root_node = of_find_node_by_path("/");
 	struct property *root_prop = NULL;
 	char *soc = NULL;
-	char compatible_val[32] = {"amlogic, meson-"};
-	struct device_node *compatible_node = NULL;
+	char com_val_meson[32] = {"amlogic, meson-"};
+	char com_val_fb[32] = {"amlogic, fb-"};
+	struct device_node *com_node = NULL;
 
 	for (root_prop = root_node->properties; root_prop; root_prop = root_prop->next) {
 		if (of_prop_cmp(root_prop->name, "compatible") == 0) {
 			soc = ((char *)root_prop->value) + strlen("amlogic, ");
-			strcat(compatible_val, soc);
-			compatible_node = of_find_compatible_node(NULL, NULL, compatible_val);
-			if (compatible_node)
-				irq_id = of_irq_get_byname(compatible_node, SRC_IRQ_NAME);
-			goto exit;
+
+			strcat(com_val_meson, soc);
+			com_node = of_find_compatible_node(NULL, NULL, com_val_meson);
+			if (com_node) {
+				irq_id = of_irq_get_byname(com_node, SRC_IRQ_NAME);
+				goto exit;
+			}
+
+			strcat(com_val_fb, soc);
+			com_node = of_find_compatible_node(NULL, NULL, com_val_fb);
+			if (com_node) {
+				irq_id = of_irq_get_byname(com_node, SRC_IRQ_NAME);
+				goto exit;
+			}
 		}
 	}
 
 exit:
 	if (irq_id <= 0) {
-		pr_err("SOC: %s; node: %p; node compatible value: %s; interrupt name: %s; interrupt id: %d;\n",
-				soc, compatible_node, compatible_val,
+		pr_err("SOC: %s; node: %p; node compatible value: %s/%s; interrupt name: %s; interrupt id: %d;\n",
+				soc, com_node, com_val_meson, com_val_fb,
 				SRC_IRQ_NAME, irq_id);
 		pr_err("not found %s interrupt\n", SRC_IRQ_NAME);
 	}
@@ -90,16 +98,12 @@ int optee_wm_irq_register(void)
 
 	wm_sts = check_wm_status();
 	if (wm_sts) {
-#ifdef OPTEE_WM_DEBUG
 		pr_info("checking watermark status return 0x%08X\n", wm_sts);
-#endif
 		return -1;
 	}
 
 	g_irq_id = get_wm_irq_id();
-#ifdef OPTEE_WM_DEBUG
 	pr_info("%s interrupt id: %d\n", DST_IRQ_NAME, g_irq_id);
-#endif
 
 	err_num = request_irq(g_irq_id, &vsync_isr, IRQF_SHARED, DST_IRQ_NAME, (void *)&g_irq_id);
 	if (err_num)
