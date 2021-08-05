@@ -30,6 +30,7 @@
 #include "optee_private.h"
 #include "optee_smc.h"
 #include "../tee_private.h"
+#include <linux/dma-mapping.h>
 
 #define DRIVER_NAME "optee"
 
@@ -485,12 +486,18 @@ static int optee_probe(struct platform_device *pdev)
 	}
 	optee->teedev = teedev;
 
+	optee->teedev->dev.coherent_dma_mask = DMA_BIT_MASK(64);
+	optee->teedev->dev.dma_mask = &optee->teedev->dev.coherent_dma_mask;
+
 	teedev = tee_device_alloc(&optee_supp_desc, NULL, pool, optee);
 	if (IS_ERR(teedev)) {
 		rc = PTR_ERR(teedev);
 		goto err;
 	}
 	optee->supp_teedev = teedev;
+
+	optee->supp_teedev->dev.coherent_dma_mask = DMA_BIT_MASK(64);
+	optee->supp_teedev->dev.dma_mask = &optee->supp_teedev->dev.coherent_dma_mask;
 
 	rc = tee_device_register(optee->teedev);
 	if (rc)
